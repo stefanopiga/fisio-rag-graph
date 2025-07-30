@@ -1,0 +1,209 @@
+## Pattern Aggiunti - 2025-07-28
+
+### 1. Gestione Robusta Serializzazione Numpy in FastAPI/Pydantic
+
+- **Problema**: `PydanticSerializationError` per tipi non-nativi come `numpy.float32` durante la serializzazione JSON delle risposte API, causando errori 500.
+- **Pattern di Soluzione**: Implementare una strategia multilivello per garantire la conversione dei tipi `numpy` in tipi Python nativi prima della serializzazione:
+  1.  **All'origine (`tools.py`)**: Convertire immediatamente i valori dopo la loro generazione (es. `score = float(score)` dopo una predizione di `CrossEncoder`).
+  2.  **Nei modelli (`models.py`)**: Utilizzare `field_validator` personalizzati per intercettare e convertire i tipi `numpy` in tipi Python nativi (es. `v.item()` per scalari numpy).
+  3.  **In uscita (`api.py`)**: Assicurarsi che tutti gli endpoint API che restituiscono dati complessi utilizzino `response_model` per forzare la validazione e la conversione definita nei modelli Pydantic.
+
+- **Esempio (`models.py`)**:
+  ```python
+  from pydantic import field_validator, BaseModel
+  
+  class ChunkResult(BaseModel):
+      # ...
+      score: float
+  
+      @field_validator('score', mode='before')
+      @classmethod
+      def validate_score(cls, v: Any) -> float:
+          if hasattr(v, 'item'):  # numpy scalar
+              return v.item()
+          return float(v)
+  ```
+
+- **Risultato**: API robuste che possono gestire output numerici da librerie scientifiche (es. `sentence-transformers`) senza fallire in fase di serializzazione, indipendentemente dal percorso del codice.
+
+### 2. Testing API Automatizzato in Ambienti CMD/Conda
+
+- **Problema**: Eseguire test API (`curl` con JSON complessi) in modo affidabile da script batch (`.bat`) è difficile a causa dei problemi di escaping delle virgolette doppie in CMD.
+- **Pattern di Soluzione**: Evitare l'inline JSON. Lo script batch scrive dinamicamente il payload JSON in un file temporaneo (`temp_payload.json`) e poi passa il file a `curl` usando l'opzione `--data-binary @filename`. Questo approccio è più robusto e portabile.
+
+- **Esempio (`test_api_complete_fixed.bat`)**:
+  ```batch
+  :: 1. Crea il file JSON temporaneo
+  echo {"query": "dolore lombare", "limit": 5} > temp_search.json
+
+  :: 2. Esegui curl usando il file
+  curl -X POST "%BASE_URL%/search" -H "Content-Type: application/json" --data-binary @temp_search.json
+  
+  :: 3. Pulisci il file (opzionale ma consigliato)
+  if exist "temp_search.json" del "temp_search.json"
+  ```
+- **Risultato**: Framework di test API automatizzato, portabile e robusto, che funziona senza problemi in ambienti CMD/Conda.
+
+### 3. Gestione Errori di Codifica su Windows in FastAPI
+
+- **Problema**: `UnicodeEncodeError: 'charmap' codec can't encode character...` quando si scrive su file in un'applicazione FastAPI su Windows.
+- **Pattern di Soluzione**: Specificare esplicitamente la codifica `utf-8` quando si aprono i file per la scrittura. Python su Windows utilizza di default una codifica di sistema (`cp1252` o `charmap`) che non supporta tutti i caratteri Unicode.
+
+- **Esempio (`api.py`)**:
+  ```python
+  # Errato (usa la codifica di default del sistema)
+  # with open("logfile.log", "a") as f:
+  
+  # Corretto (forza UTF-8)
+  with open("logfile.log", "a", encoding="utf-8") as f:
+      f.write("Log con caratteri speciali: · α β γ")
+  ```
+- **Risultato**: Applicazioni portabili che gestiscono correttamente i dati Unicode indipendentemente dal sistema operativo su cui vengono eseguite.
+
+## Pattern Aggiunti - 2025-07-30
+
+### 4. Debug Logger Formatting e Code Syntax Critical Bugs
+
+- **Problema**: `NameError: name 'variable' is not defined` causato da variabili dichiarate sulla stessa riga dei commenti in sistemi di logging avanzati, causando crash critici del sistema.
+- **Pattern di Soluzione**: Separazione rigorosa tra commenti e dichiarazioni di variabili, con controlli pre-commit per validare la sintassi del codice critico.
+
+- **Esempio (Scorretto in `debug_logger.py`)**:
+  ```python
+  # Salva in file giornaliero        date_str = datetime.utcnow().strftime("%Y%m%d")
+  ```
+
+- **Esempio (Corretto)**:
+  ```python
+  # Salva in file giornaliero
+  date_str = datetime.utcnow().strftime("%Y%m%d")
+  ```
+
+- **Prevenzione**:
+  - Code formatting standards rigorosi
+  - Pre-commit hooks per syntax validation
+  - Linting automatico su sistemi critici (logging, auth, WebSocket)
+
+- **Risultato**: Eliminazione di crash critici causati da errori di formatting in componenti di sistema essenziali.
+
+### 5. Advanced Debug Infrastructure Pattern
+
+- **Problema**: Debugging complesso di sistemi WebSocket e API senza strumentazione adeguata per tracciare richieste end-to-end.
+- **Pattern di Soluzione**: Implementare un sistema di logging strutturato con request tracing, context management e analisi post-mortem automatica.
+
+- **Componenti Core**:
+  1. **Structured Logger** (`debug_logger.py`): Request lifecycle tracking con UUID
+  2. **Log Analysis Framework** (`analyze_logs.py`): Post-incident analysis automatica
+  3. **Context Managers**: WebSocket request context con error handling
+
+- **Esempio (`debug_logger.py`)**:
+  ```python
+  class StructuredDebugLogger:
+      @asynccontextmanager
+      async def websocket_request_context(self, state):
+          request_id = self.generate_request_id()
+          self.log_backend_event(request_id, "websocket_start", f"State: {state}")
+          try:
+              yield request_id
+          except Exception as e:
+              self.log_backend_event(request_id, "websocket_error", "Failed", error=e)
+          finally:
+              self.save_request_trace(request_id)
+  ```
+
+- **Log Structure**:
+  - `/logs/backend/requests_YYYYMMDD.jsonl`: Structured daily logs
+  - `/logs/debug/trace_{request_id}.json`: Individual request traces
+  - `/logs/frontend/`: Frontend logs per debugging UI issues
+
+- **Risultato**: Debug capabilities production-grade con trace completo delle richieste e analisi automatica dei pattern di errore.
+
+### 6. WebSocket Testing & Debugging Pattern
+
+- **Problema**: Debugging di problemi WebSocket complessi richiede test isolati e progressivi per identificare il punto di failure esatto.
+- **Pattern di Soluzione**: Suite di test dedicati con complessità crescente per isolamento sistematico dei problemi.
+
+- **Test Suite Structure**:
+  1. **`test_simple_ws.py`**: Minimal connectivity test
+  2. **`test_websocket_minimal.py`**: Complete end-to-end stream testing
+  3. **`analyze_logs.py`**: Post-test analysis automatica
+
+- **Esempio (`test_simple_ws.py`)**:
+  ```python
+  async def simple_test():
+      async with websockets.connect("ws://127.0.0.1:8058/ws") as ws:
+          # Test connettività base
+          confirmation = await ws.recv()
+          # Test invio messaggio
+          await ws.send(json.dumps(test_message))
+          # Test ricezione con timeout
+          for i in range(10):
+              try:
+                  response = await asyncio.wait_for(ws.recv(), timeout=3.0)
+              except asyncio.TimeoutError:
+                  print(f"Timeout {i+1}")
+  ```
+
+- **Testing Strategy**:
+  - Progressive complexity: basic → full system
+  - Timeout handling per prevent hanging
+  - Detailed logging ad ogni step
+  - Error isolation con try-catch specifici
+
+- **Risultato**: Debugging sistematico di problemi WebSocket con identificazione rapida del punto di failure.
+
+### 7. Environment & Process Management Pattern
+
+- **Problema**: Conflitti di ambiente (conda vs sistema), processi interferenti su porte network, e restart requirement per modifiche al codice.
+- **Pattern di Soluzione**: Gestione sistematica dell'ambiente di sviluppo con cleanup automatico e restart procedures.
+
+- **Environment Management**:
+  ```bash
+  # Attivazione ambiente corretta
+  conda activate fisio-rag
+  
+  # Verifica ambiente attivo
+  which python  # Deve puntare a conda env
+  
+  # Avvio backend con reload per development
+  python -m agent.api --reload
+  ```
+
+- **Process Cleanup Pattern**:
+  ```bash
+  # Identificazione processi interferenti
+  netstat -ano | findstr :8058
+  
+  # Terminazione forzata
+  taskkill /F /PID <PID>
+  
+  # Verifica pulizia
+  netstat -ano | findstr :8058  # Deve essere vuoto
+  ```
+
+- **Code Reload Strategy**:
+  - Restart backend process per changes a logging systems
+  - Use background process spawning per avoid terminal blocking
+  - Implement graceful shutdown handling
+
+- **Risultato**: Ambiente di sviluppo stabile con gestione automatica dei conflitti e restart requirements.
+
+### 8. Critical Bug Resolution Methodology
+
+- **Problema**: Bug critici che bloccano completamente il sistema richiedono approccio sistematico per risoluzione rapida.
+- **Pattern di Soluzione**: Metodologia strutturata per identificazione, isolamento e risoluzione di bug production-breaking.
+
+- **Resolution Framework**:
+  1. **Error Trace Analysis**: Analisi completa dello stack trace
+  2. **Component Isolation**: Test isolati per ogni componente
+  3. **Progressive Testing**: Fix incrementali con test ad ogni step
+  4. **Environment Verification**: Verifica reload/restart requirements
+  5. **Post-Resolution Validation**: Test end-to-end per conferma fix
+
+- **Critical Areas Monitoring**:
+  - **WebSocket State Management**: Enum vs string comparisons
+  - **Async/Await Consistency**: Event loop blocking prevention
+  - **Model Validation**: Pydantic field alignment
+  - **Import Path Accuracy**: Module and function import verification
+  - **Logging System Syntax**: Critical syntax validation
+
+- **Risultato**: Framework per risoluzione rapida di bug critici con prevenzione di regressioni simili. 
